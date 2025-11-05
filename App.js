@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   SafeAreaView,
@@ -17,16 +17,22 @@ import {
   KeyboardAvoidingView,
   Platform,
   NativeModules,
+  Alert,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Svg, { Circle, G } from 'react-native-svg';
 import { Feather } from '@expo/vector-icons';
+import Constants from 'expo-constants';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 
 const screenWidth = Dimensions.get('window').width;
 const donutSize = Math.min(screenWidth * 0.48, 220);
 const donutStrokeWidth = 18;
 const donutRadius = donutSize / 2;
 const circumference = 2 * Math.PI * (donutRadius - donutStrokeWidth / 2);
+
+const TRANSACTIONS_CACHE_KEY = 'pf_transactions_v1';
+const OCR_ITEMS_CACHE_KEY = 'pf_ocr_items_v1';
 
 const summary = {
   balance: 5200.5,
@@ -64,6 +70,120 @@ export default function App() {
   const [ocrItems, setOcrItems] = useState([]);
   const [pendingItems, setPendingItems] = useState([]);
   const [ocrError, setOcrError] = useState(null);
+  const [transactionsList, setTransactionsList] = useState(transactions);
+  const [isManualModalVisible, setManualModalVisible] = useState(false);
+  const [manualDescription, setManualDescription] = useState('');
+  const [manualAmount, setManualAmount] = useState('');
+  const [manualPayee, setManualPayee] = useState('');
+  const [manualCategoryId, setManualCategoryId] = useState(null);
+  const [isCategoryPickerOpen, setCategoryPickerOpen] = useState(false);
+  const [manualDate, setManualDate] = useState(new Date());
+
+  const currencySymbol = '€';
+  const formatShortDate = (d) => {
+    try {
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      return `${day}/${month}/${year}`;
+    } catch {
+      return '';
+    }
+  };
+  
+  const loadTransactions = async () => {
+    try {
+      if (!isSupabaseConfigured || !supabase) return;
+      const { data, error } = await supabase
+        .from('transactions')
+        .select('id,label,amount,icon,transaction_at')
+        .order('transaction_at', { ascending: false })
+        .limit(50);
+      if (error) throw error;
+      const mapped = (data || []).map((row) => ({
+        id: String(row.id),
+        icon: row.icon || 'shopping-bag',
+        label: row.label,
+        amount: Number(row.amount),
+      }));
+      setTransactionsList(mapped);
+    } catch (e) {
+      console.error('Load transactions error', e);
+    }
+  };
+
+  const loadCachedTransactions = async () => {
+    try {
+      const json = await AsyncStorage.getItem(TRANSACTIONS_CACHE_KEY);
+      if (json) {
+        const cached = JSON.parse(json);
+        if (Array.isArray(cached)) {
+          setTransactionsList(cached);
+        }
+      }
+    } catch (e) {
+      console.error('Load transactions cache error', e);
+    }
+  };
+
+  const loadCachedOcrItems = async () => {
+    try {
+      const json = await AsyncStorage.getItem(OCR_ITEMS_CACHE_KEY);
+      if (json) {
+        const cached = JSON.parse(json);
+        if (Array.isArray(cached)) {
+          setOcrItems(cached);
+        }
+      }
+    } catch (e) {
+      console.error('Load OCR cache error', e);
+    }
+  };
+
+  useEffect(() => {
+    loadCachedTransactions();
+    loadCachedOcrItems();
+    loadTransactions();
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.setItem(TRANSACTIONS_CACHE_KEY, JSON.stringify(transactionsList)).catch((e) =>
+      console.error('Save transactions cache error', e),
+    );
+  }, [transactionsList]);
+
+  useEffect(() => {
+    AsyncStorage.setItem(OCR_ITEMS_CACHE_KEY, JSON.stringify(ocrItems)).catch((e) =>
+      console.error('Save OCR cache error', e),
+    );
+  }, [ocrItems]);
+  
+  const handleConnectPress = async () => {
+    try {
+      if (!isSupabaseConfigured || !supabase) {
+        Alert.alert(
+          'Supabase not configured',
+          'Add your EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY (or set expo.extra.supabaseUrl/AnonKey in app.json), then reload.'
+        );
+        return;
+      }
+      const testTable = process.env.EXPO_PUBLIC_SUPABASE_TEST_TABLE || Constants.expoConfig?.extra?.supabaseTestTable;
+      if (!testTable) {
+        Alert.alert(
+          'Set a test table',
+          'Provide EXPO_PUBLIC_SUPABASE_TEST_TABLE or expo.extra.supabaseTestTable in app.json to run a sample fetch.'
+        );
+        return;
+      }
+      const { data, error } = await supabase.from(testTable).select('*').limit(5);
+      if (error) throw error;
+      console.log('Supabase sample rows:', data);
+      Alert.alert('Supabase OK', `Fetched ${data?.length || 0} rows from ${testTable}.`);
+    } catch (e) {
+      console.error('Supabase test error', e);
+      Alert.alert('Supabase error', e.message || 'Unknown error');
+    }
+  };
   
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -76,17 +196,9 @@ export default function App() {
       >
         <Pressable onPress={() => isFabMenuOpen && setFabMenuOpen(false)}>
           <View style={styles.screenWrapper}>
-            <LinearGradient
-              colors={['#2e875d', '#1f6f4d']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.headerCard}
-            >
+            <View style={{ marginTop: 16 }}>
               <View style={styles.headerTopRow}>
-                <TouchableOpacity style={styles.menuButton}>
-                  <Feather name="menu" size={24} color="#f8fbf7" />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.headerConnectButton}>
+                <TouchableOpacity style={styles.headerConnectButton} onPress={handleConnectPress}>
                   <Image
                     source={require('./assets/mercado-pago-logo.png')}
                     style={styles.headerConnectLogo}
@@ -94,14 +206,7 @@ export default function App() {
                   <Text style={styles.headerConnectText}>Connect Mercado Pago</Text>
                 </TouchableOpacity>
               </View>
-
-              <Text style={styles.balanceLabel}>Total Balance</Text>
-              <Text style={styles.balanceValue}>{formatCurrency(summary.balance)}</Text>
-              <View style={styles.balanceChange}>
-                <Feather name="arrow-up-right" size={16} color="#1f6f4d" />
-                <Text style={styles.balanceChangeText}>{formatChange(summary.weeklyChange)} this week</Text>
-              </View>
-            </LinearGradient>
+            </View>
 
           <View style={styles.tabBar}>
             <TouchableOpacity style={styles.tabChipActive}>
@@ -182,7 +287,7 @@ export default function App() {
               </TouchableOpacity>
             </View>
             <FlatList
-              data={transactions}
+              data={transactionsList}
               keyExtractor={(item) => item.id}
               renderItem={({ item }) => (
                 <View style={styles.transactionRow}>
@@ -235,7 +340,13 @@ export default function App() {
     {isFabMenuOpen && (
       <Pressable style={styles.fabMenuBackdrop} onPress={() => setFabMenuOpen(false)}>
         <View style={styles.fabMenu}>
-          <TouchableOpacity style={styles.fabMenuButton}>
+          <TouchableOpacity
+            style={styles.fabMenuButton}
+            onPress={() => {
+              setFabMenuOpen(false);
+              setManualModalVisible(true);
+            }}
+          >
             <View style={styles.fabMenuIconWrapper}>
               <Feather name="edit-3" size={20} color="#1f6f4d" />
             </View>
@@ -369,6 +480,167 @@ export default function App() {
               </TouchableOpacity>
             </View>
           )}
+        </KeyboardAvoidingView>
+      </View>
+    </Modal>
+    <Modal
+      visible={isManualModalVisible}
+      animationType="slide"
+      transparent
+      onRequestClose={() => setManualModalVisible(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalSheet}
+        >
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>New Transaction</Text>
+            <TouchableOpacity onPress={() => setManualModalVisible(false)}>
+              <Feather name="x" size={24} color="#1f3b2d" />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.modalContent}>
+            <View style={styles.amountInputCard}>
+              <View style={styles.amountRow}>
+                <Text style={styles.amountCurrency}>{currencySymbol}</Text>
+                <TextInput
+                  value={manualAmount}
+                  onChangeText={(text) => setManualAmount(text.replace(/[^0-9.,-]/g, ''))}
+                  placeholder="0.00"
+                  placeholderTextColor="#7a8b80"
+                  keyboardType="decimal-pad"
+                  style={styles.amountInputLarge}
+                  selectionColor="#1f6f4d"
+                />
+              </View>
+            </View>
+
+            <TextInput
+              value={manualPayee}
+              onChangeText={setManualPayee}
+              placeholder="Payee"
+              placeholderTextColor="#7a8b80"
+              style={styles.modalInputDescription}
+              selectionColor="#1f6f4d"
+            />
+
+            <View style={styles.detailsCard}>
+              <Text style={styles.detailsTitle}>Details</Text>
+
+              <Pressable style={styles.detailRow} onPress={() => setCategoryPickerOpen((p) => !p)}>
+                <Text style={styles.detailLabel}>Category</Text>
+                <View style={styles.detailValueWrap}>
+                  <Text style={styles.detailValueText}>
+                    {manualCategoryId ? (categories.find((c) => c.id === manualCategoryId)?.label || 'Select Category…') : 'Select Category…'}
+                  </Text>
+                  <Feather name={isCategoryPickerOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#1f3b2d" />
+                </View>
+              </Pressable>
+              {isCategoryPickerOpen && (
+                <View style={styles.categoryPicker}>
+                  {categories.map((cat) => (
+                    <Pressable
+                      key={cat.id}
+                      style={[styles.categoryOption, manualCategoryId === cat.id && styles.categoryOptionSelected]}
+                      onPress={() => {
+                        setManualCategoryId(cat.id);
+                        setCategoryPickerOpen(false);
+                      }}
+                    >
+                      <View style={[styles.legendDot, { backgroundColor: cat.color }]} />
+                      <Text style={styles.categoryOptionText}>{cat.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+
+              <View style={styles.detailRowStatic}>
+                <Text style={styles.detailLabel}>Description</Text>
+                <TextInput
+                  value={manualDescription}
+                  onChangeText={setManualDescription}
+                  placeholder="Description"
+                  placeholderTextColor="#7a8b80"
+                  style={styles.detailTextInput}
+                  selectionColor="#1f6f4d"
+                />
+              </View>
+
+              <Pressable style={styles.detailRow} onPress={() => setManualDate(new Date())}>
+                <Text style={styles.detailLabel}>Date</Text>
+                <View style={styles.detailValueWrap}>
+                  <Feather name="calendar" size={16} color="#1f3b2d" />
+                  <Text style={styles.detailValueText}>  {formatShortDate(manualDate)}</Text>
+                </View>
+              </Pressable>
+
+              <View style={styles.detailRowDisabled}>
+                <Text style={styles.detailLabel}>Account</Text>
+                <Text style={styles.detailDisabledText}>Default</Text>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              style={styles.primaryButton}
+              onPress={async () => {
+                const amountNumber = Number(manualAmount);
+                if (!isFinite(amountNumber)) {
+                  Alert.alert('Invalid input', 'Please enter a valid amount.');
+                  return;
+                }
+                const normalized = -Math.abs(amountNumber);
+                const fallbackInsert = () => {
+                  const newItem = {
+                    id: `${Date.now()}`,
+                    icon: 'shopping-bag',
+                    label: (manualPayee || manualDescription).trim() || 'Transaction',
+                    amount: normalized,
+                  };
+                  setTransactionsList((prev) => [newItem, ...prev]);
+                };
+                if (isSupabaseConfigured && supabase) {
+                  try {
+                    const { data, error } = await supabase
+                      .from('transactions')
+                      .insert({
+                        label: (manualPayee || manualDescription).trim() || 'Transaction',
+                        amount: normalized,
+                        icon: 'shopping-bag',
+                        category_id: manualCategoryId || null,
+                        transaction_at: manualDate?.toISOString?.() || null,
+                      })
+                      .select('id,label,amount,icon')
+                      .single();
+                    if (error) throw error;
+                    setTransactionsList((prev) => [
+                      {
+                        id: String(data.id),
+                        icon: data.icon || 'shopping-bag',
+                        label: data.label,
+                        amount: Number(data.amount),
+                      },
+                      ...prev,
+                    ]);
+                  } catch (e) {
+                    console.error('Insert transaction error', e);
+                    Alert.alert('Save failed', e.message || 'Unable to save to Supabase. Saving locally instead.');
+                    fallbackInsert();
+                  }
+                } else {
+                  fallbackInsert();
+                }
+                setManualDescription('');
+                setManualAmount('');
+                setManualPayee('');
+                setManualCategoryId(null);
+                setManualDate(new Date());
+                setManualModalVisible(false);
+              }}
+            >
+              <Text style={styles.primaryButtonText}>Add Expense</Text>
+            </TouchableOpacity>
+          </View>
         </KeyboardAvoidingView>
       </View>
     </Modal>
@@ -714,6 +986,31 @@ const styles = StyleSheet.create({
   modalContent: {
     gap: 24,
   },
+  amountInputCard: {
+    backgroundColor: '#eaf6ed',
+    borderRadius: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  amountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  amountCurrency: {
+    color: '#1f3b2d',
+    fontSize: 22,
+    fontWeight: '700',
+  },
+  amountInputLarge: {
+    flex: 1,
+    marginLeft: 8,
+    color: '#1f3b2d',
+    backgroundColor: 'transparent',
+    fontWeight: '700',
+    fontSize: 28,
+    textAlign: 'right',
+  },
   modalError: {
     backgroundColor: 'rgba(220, 53, 69, 0.08)',
     borderRadius: 14,
@@ -764,6 +1061,85 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     color: '#5b7a63',
     paddingVertical: 24,
+  },
+  detailsCard: {
+    backgroundColor: '#f4fbf5',
+    borderRadius: 18,
+    padding: 12,
+    gap: 10,
+  },
+  detailsTitle: {
+    color: '#1f3b2d',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  detailRow: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  detailRowStatic: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+  },
+  detailLabel: {
+    color: '#1f3b2d',
+    fontWeight: '600',
+  },
+  detailValueWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  detailValueText: {
+    color: '#1f3b2d',
+    fontWeight: '600',
+  },
+  detailTextInput: {
+    marginTop: 4,
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 8,
+    color: '#1f3b2d',
+  },
+  categoryPicker: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e3f3e8',
+  },
+  categoryOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  categoryOptionSelected: {
+    backgroundColor: '#eaf6ed',
+  },
+  categoryOptionText: {
+    color: '#1f3b2d',
+  },
+  detailRowDisabled: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    opacity: 0.7,
+  },
+  detailDisabledText: {
+    color: '#5b7a63',
   },
   primaryButton: {
     backgroundColor: '#1f6f4d',
